@@ -6,7 +6,6 @@
   register: drill_downloaded
 
 - name: Download Apache Drill
-  become_user: root
   environment:
     http_proxy: '{{ http_proxy }}'
     https_proxy: '{{ https_proxy }}'
@@ -16,50 +15,54 @@
   when: not drill_downloaded.stat.exists
 
 - name: Create destination directory
+  become: True
+  become_user: root
   file:
     path: /opt/drill
-    owner: '{{admin_username}}'
-    group: hadoop
+    owner: '{{drillbit_user}}'
+    group: hdfs
     state: directory
 
 - name: Extract Drill
-  unarchive:
-    src: /tmp/apache-drill-{{drill_version}}.tar.gz
-    dest: /opt/drill
-    copy: no
+  become: True
+  become_user: '{{drillbit_user}}'
+  command: tar -C /opt/drill -vxzf /tmp/apache-drill-{{drill_version}}.tar.gz
 
 - name: Set Permissions for Drill
+  become: True
+  become_user: root
   file:
     path: /opt/drill
-    owner: '{{admin_username}}'
-    group: hadoop
+    owner: '{{drillbit_user}}'
+    group: '{{drillbit_group}}'
     recurse: true
 
 - name: Create links for current
   file:
     path: /opt/drill/current
-    owner: '{{admin_username}}'
-    group: hadoop
+    owner: '{{drillbit_user}}'
+    group: '{{drillbit_group}}'
     src: /opt/drill/apache-drill-{{drill_version}}
     state: link
 
 - name: Create Drill directory for /etc
   file:
     path: /etc/drill
-    owner: '{{admin_username}}'
-    group: hadoop
+    owner: '{{drillbit_user}}'
+    group: '{{drillbit_group}}'
     state: directory
 
 - name: Create link for /etc/drill
   file:
     path: /etc/drill/conf
-    owner: '{{admin_username}}'
-    group: hadoop
+    owner: '{{drillbit_user}}'
+    group: '{{drillbit_group}}'
     src: /opt/drill/current/conf
     state: link
 
 - name: Set cluster name
-  become_user: '{{admin_username}}'
+  become_user: '{{drillbit_user}}'
+  become: True
   lineinfile:
     dest: /etc/drill/conf/drill-override.conf
     line: 'cluster-id: "{{cluster_id}}",'
@@ -71,7 +74,8 @@
     zookeeper_list: "{% for host in groups.zookeeper %}{{hostvars[host]['ansible_fqdn']}}:{{zookeeper_port}}{% if not loop.last %},{% endif %}{% endfor %}"
 
 - name: Configure Zookeepers for Apache Drill
-  become_user: '{{admin_username}}'
+  become_user: '{{drillbit_user}}'
+  become: True
   lineinfile:
     dest: /etc/drill/conf/drill-override.conf
     line: 'zk.connect: "{{ zookeeper_list }}"'
@@ -79,57 +83,133 @@
     state: present
 
 - name: Configure Drill Max Direct Memory
-  become_user: '{{admin_username}}'
+  become_user: '{{drillbit_user}}'
+  become: True
   lineinfile:
     dest: /etc/drill/conf/drill-env.sh
     line: 'DRILL_MAX_DIRECT_MEMORY="{{drill_max_direct_memory}}"'
     regexp: ^DRILL_MAX_DIRECT_MEMORY
     state: present
 
+- name: Set umask in drill-env.sh
+  become_user: '{{drillbit_user}}'
+  become: True
+  lineinfile:
+    dest: /etc/drill/conf/drill-env.sh
+    line: 'umask 0022'
+    regexp: ^umask
+    state: present
+
 - name: Configure Drill Heap Memory
-  become_user: '{{admin_username}}'
+  become_user: '{{drillbit_user}}'
+  become: True
   lineinfile:
     dest: /etc/drill/conf/drill-env.sh
     line: 'DRILL_HEAP="{{drill_heap}}"'
     regexp: ^DRILL_HEAP
 
 - name: Create pstore directory
-  become_user: '{{admin_username}}'
+  become_user: '{{drillbit_user}}'
+  become: True
   run_once: yes
   command: hadoop fs -mkdir -p /apps/drill/pstore
 
 - name: enable HDFS pstore
-  become_user: '{{admin_username}}'
+  become_user: '{{drillbit_user}}'
+  become: True
   lineinfile:
     dest: /opt/drill/current/conf/drill-override.conf
     line: 'drill.exec.sys.store.provider.zk.blobroot: "hdfs://{{groups["namenode"][0]}}/apps/drill/pstore/"'
     regexp: "drill.exec.sys.store.provider.zk.blobroot"
     state: present
 
-- name: pause for a bit
-  pause: seconds=30
+- name: get JPam tarball
+  become_user: root
+  become: True
+  get_url:
+    url: 'http://downloads.sourceforge.net/project/jpam/jpam/jpam-1.1/JPam-Linux_amd64-1.1.tgz?r=https%3A%2F%2Fsourceforge.net%2Fprojects%2Fjpam%2Ffiles%2Fjpam%2Fjpam-1.1%2F&ts=1466453177&use_mirror=liquidtelecom'
+    dest: /tmp/JPam-Linux_amd64-1.1.tgz
 
-- name: restart drillbits now
-  become_user: '{{admin_username}}'
-  command: /opt/drill/current/bin/drillbit.sh --config /opt/drill/current/conf restart
+- name: unpack JPam tarball
+  become_user: root
+  become: True
+  unarchive: src=/tmp/JPam-Linux_amd64-1.1.tgz dest=/opt copy=no
+
+- name: add java.library.path to drill-env.sh
+  become_user: '{{drillbit_user}}'
+  become: True
+  lineinfile: dest=/opt/drill/apache-drill-{{drill_version}}/conf/drill-env.sh line='export DRILLBIT_JAVA_OPTS=" -Djava.library.path=/opt/JPam-1.1"' regexp='java.library.path' state=present
+  register: jpam_added
+
+# XXX: Adding as a single line is not as good as parsing the HOCON
+# XXX: and writing it back out, perhaps in a hocon module. But pyhocon
+# XXX: does not support a syntax that drill uses liberally, so we cannot
+# XXX: yet parse the drill config.
+- name: enable impersonation
+  become: True
+  become_user: '{{drillbit_user}}'
+  lineinfile:
+    dest: /opt/drill/apache-drill-{{drill_version}}/conf/drill-override.conf
+    line: "drill.exec.impersonation: { enabled: true, max_chained_user_hops: 3 }"
+    state: present
+
+- name: remove core-site.xml from drill conf
+  become: True
+  become_user: '{{drillbit_user}}'
+  file:
+    state: absent
+    dest: /opt/drill/apache-drill-{{drill_version}}/conf/core-site.xml
+
+- name: link core-site.xml into drill conf dir
+  become: True
+  become_user: '{{drillbit_user}}'
+  file:
+    state: link
+    src: /etc/hadoop/conf/core-site.xml
+    dest: /opt/drill/apache-drill-{{drill_version}}/conf/core-site.xml
+    backup: yes
+
+- name: enable PAM authentication
+  become: True
+  become_user: '{{drillbit_user}}'
+  lineinfile:
+    dest: /opt/drill/apache-drill-{{drill_version}}/conf/drill-override.conf
+    regexp: pam_profiles
+    line: 'drill.exec { security.user.auth { enabled: true, packages += "org.apache.drill.exec.rpc.user.security", impl: "pam", pam_profiles: [ "login","sudo","sshd","password-auth" ] } }'
+    state: present
+  register: pam_enabled
+
+- name: stop drillbits now
+  become: True
+  become_user: '{{drillbit_user}}'
+  command: /opt/drill/current/bin/drillbit.sh --config /opt/drill/current/conf stop
+
+- name: start drillbits now
+  become: True
+  become_user: '{{drillbit_user}}'
+  command: /opt/drill/current/bin/drillbit.sh --config /opt/drill/current/conf start
 
 - name: wait for drillbits to come up
-  wait_for: port=8047 delay=10 timeout=60
+  wait_for: port=8047 delay=0 timeout=60
 
 - name: create dfs storage plugin json file
-  become_user: '{{admin_username}}'
+  become: True
+  become_user: '{{drillbit_user}}'
   template: src=dfs-storage-plugin.json.j2 dest=/tmp/dfs-storage-plugin.json mode=0644
 
+- name: log in to drillbit
+  command: curl -c /tmp/.drillbit_cookies -f -k -X POST -d j_username={{drillbit_user}} -d j_password={{drillbit_user_password_clear}} http://localhost:8047/j_security_check
+  run_once: true
+
 - name: add dfs storage plugin
-  shell: 'curl -f -H "Content-Type: application/json" -X POST -d @/tmp/dfs-storage-plugin.json http://localhost:8047/storage/dfs.json'
+  shell: 'curl -b /tmp/.drillbit_cookies -f -X POST -H "Content-Type: application/json" -d @/tmp/dfs-storage-plugin.json http://localhost:8047/storage/dfs.json'
   run_once: true
 
 - name: create hive storage plugin json file
-  become_user: '{{admin_username}}'
   template: src=hive-storage-plugin.json.j2 dest=/tmp/hive-storage-plugin.json mode=0644
   when: hive_enabled is defined and hive_enabled == True
 
 - name: add hive storage plugin (no SSL)
-  shell: 'curl -f -H "Content-Type: application/json" -X POST -d @/tmp/hive-storage-plugin.json http://localhost:8047/storage/hive.json'
+  shell: 'curl -b /tmp/.drillbit_cookies -f -X POST -H "Content-Type: application/json" -d @/tmp/hive-storage-plugin.json http://localhost:8047/storage/hive.json'
   run_once: true
   when: hive_enabled is defined and hive_enabled == True
