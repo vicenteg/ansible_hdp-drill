@@ -1,0 +1,38 @@
+# ansible-playbook --become -u centos -i inventory hacks.yml
+
+- name: Post Install smoke tests
+  hosts: all
+  tasks:
+      - name: verify that query with bad authn fails
+        shell: "echo 'select * from cp.`employee.json`' | /opt/drill/apache-drill-{{drill_version}}/bin/sqlline -u jdbc:drill: -n invaid -p bogus"
+        run_once: yes
+        register: bad_auth
+        failed_when: bad_auth.rc == 0
+        changed_when: false
+
+      - name: try to run a query from sqlline with valid authn
+        shell: "echo 'select * from cp.`employee.json`' | /opt/drill/apache-drill-{{drill_version}}/bin/sqlline -u jdbc:drill: -n {{pam_username}} -p {{pam_password}}"
+        run_once: yes
+        changed_when: false
+
+      - name: get primary group of user
+        command: id -ng {{pam_username}}
+        register: user_primary_group
+
+      - debug: var=pam_username 
+      - debug: var=user_primary_group.stdout 
+
+      - name: attempt CTAS and verify impersonation works
+        shell: "echo 'create table dfs.tmp.`{{pam_username}}/employee` as select * from cp.`employee.json`' | /opt/drill/apache-drill-{{drill_version}}/bin/sqlline -u jdbc:drill: -n {{pam_username}} -p {{pam_password}}"
+        run_once: yes
+
+      - name: check ownership of created table
+        command: hadoop fs -stat '%u %g' /tmp/{{pam_username}}/employee
+        run_once: yes
+        register: table_stat
+        failed_when: not table_stat.stdout | match("{{pam_username}} {{user_primary_group.stdout}}")
+
+      - name: drop created table
+        shell: "echo 'drop table dfs.tmp.`{{pam_username}}/employee`' | /opt/drill/apache-drill-{{drill_version}}/bin/sqlline -u jdbc:drill: -n {{pam_username}} -p {{pam_password}}"
+        run_once: yes
+

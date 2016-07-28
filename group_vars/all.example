@@ -1,0 +1,14 @@
+drill_version: 1.6.0
+cluster_id: cluster
+drill_max_direct_memory: 8G
+drill_heap: 4G
+drillbit_user: drill
+drillbit_uid: 31010
+drillbit_gid: 31010
+drillbit_group: drill
+drillbit_groups: wheel
+drillbit_user_password: $1$3TQvak/O$W.YPB27hOa3DleHKkWTzE0
+drillbit_user_password_clear: drill
+
+pam_username: centos
+pam_password: centos

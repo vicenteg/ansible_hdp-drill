@@ -1,0 +1,24 @@
+# ansible-playbook --become -u centos -i inventory prereqs.yml
+
+- name: Drill Prerequisites
+  hosts: all
+  tasks:
+    - name: create drill group
+      group: name={{drillbit_group}} gid={{drillbit_gid}} state=present
+
+    - name: create a drill pseudo-user
+      user: name={{drillbit_user}} group={{drillbit_group}} uid={{drillbit_uid}} groups={{drillbit_groups}} password={{drillbit_user_password}} state=present
+
+    - name: update /etc/shadow perms to allow PAM authn from wheel group
+      become_user: root
+      file: dest=/etc/shadow mode=040 group=wheel
+
+    - name: enable drill user to impersonate
+      become: True
+      become_user: root
+      hadoop_properties: file=/etc/hadoop/conf/core-site.xml name="hadoop.proxyuser.{{drillbit_user}}.users" value="*"
+ 
+    - name: enable drill user to impersonate on all hosts
+      become: True
+      become_user: root
+      hadoop_properties: file=/etc/hadoop/conf/core-site.xml name="hadoop.proxyuser.{{drillbit_user}}.hosts" value="*"
